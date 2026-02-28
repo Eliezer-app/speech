@@ -14,6 +14,7 @@ Architecture:
 Usage: python main.py
 """
 
+import argparse
 import json
 import os
 import select
@@ -222,11 +223,11 @@ class STTProcess:
         self.proc = None
 
 
-def load_agent_config():
-    """Load agent_config.yaml if it exists. Returns dict."""
-    path = _DIR / "agent_config.yaml"
-    if path.exists():
-        with open(path) as f:
+def load_agent_config(path):
+    """Load agent config YAML if it exists. Returns dict."""
+    p = Path(path)
+    if p.exists():
+        with open(p) as f:
             return yaml.safe_load(f) or {}
     return {}
 
@@ -257,7 +258,35 @@ def post_chat_message(url, text, payload_template=None):
         print(f"  [agent] chat post failed: {e}", file=sys.stderr, flush=True)
 
 
+def audio_chunks_from_file(path):
+    """Yield float32 mono 16kHz chunks from a wav file at real-time pace."""
+    import scipy.io.wavfile as wavfile
+    sr, data = wavfile.read(path)
+    if data.ndim > 1:
+        data = data[:, 0]
+    if data.dtype != np.float32:
+        data = data.astype(np.float32) / 32768.0
+    if sr != SAMPLE_RATE:
+        raise ValueError(f"Expected {SAMPLE_RATE}Hz, got {sr}Hz")
+    start = time.monotonic()
+    for i in range(0, len(data), CHUNK_SAMPLES):
+        chunk = data[i:i + CHUNK_SAMPLES]
+        if len(chunk) < CHUNK_SAMPLES:
+            chunk = np.pad(chunk, (0, CHUNK_SAMPLES - len(chunk)))
+        target = start + (i + CHUNK_SAMPLES) / SAMPLE_RATE
+        now = time.monotonic()
+        if target > now:
+            time.sleep(target - now)
+        yield chunk
+
+
 def main():
+    parser = argparse.ArgumentParser(description="Speech assistant orchestrator")
+    parser.add_argument("--audio-file", help="WAV file instead of mic")
+    parser.add_argument("--config", default=str(_DIR / "agent_config.yaml"),
+                        help="Agent config YAML (default: agent_config.yaml)")
+    args = parser.parse_args()
+
     print("=== Speech Assistant ===\n")
 
     # Start audio server
@@ -276,7 +305,7 @@ def main():
     utterances = []  # accumulated transcriptions for current session
 
     # Agent config
-    agent_cfg = load_agent_config()
+    agent_cfg = load_agent_config(args.config)
     stt_initial_prompt = agent_cfg.get("stt_initial_prompt", "")
     ctx_url = agent_cfg.get("stt_context_url")
     chat_url = agent_cfg.get("chat_message_url")
@@ -321,46 +350,82 @@ def main():
         return
     print(f"\nState: {state} — listening for wake word\n")
 
-    try:
+    def mic_chunks():
         with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32") as stream:
             while running:
                 chunk, _ = stream.read(CHUNK_SAMPLES)
-                audio.broadcast(chunk[:, 0].tobytes())
+                yield chunk[:, 0]
 
+    if args.audio_file:
+        print(f"Audio source: {args.audio_file}")
+        chunks = audio_chunks_from_file(args.audio_file)
+    else:
+        chunks = mic_chunks()
+
+    try:
+        for chunk in chunks:
+            if not running:
+                break
+            audio.broadcast(chunk.tobytes())
+
+            stt.drain_stderr()
+
+            if state == "idle":
+                conf = hotword.poll_detection()
+                if conf is not None:
+                    play_beep()
+                    print(f"\n*** Wake word detected (conf={conf:.3f}) ***")
+                    agent_ctx = fetch_stt_context(ctx_url) if ctx_url else ""
+                    parts = [p for p in [stt_initial_prompt, agent_ctx] if p]
+                    context = "\n".join(parts)
+                    if context:
+                        print(f"  [context] {context}")
+                    state = "conversing"
+                    utterances = []
+                    stt.activate(context)
+                    hotword.drain()
+
+            elif state == "conversing":
+                line = stt.poll_output()
+                if line == "END":
+                    if utterances and chat_url:
+                        text = " ".join(utterances)
+                        print(f"  [sending] {text}")
+                        post_chat_message(chat_url, text, chat_payload)
+                    state = "idle"
+                    play_idle_beep()
+                    print(f"\nState: {state} — listening for wake word\n")
+                elif line:
+                    print(f"  >> {line}")
+                    utterances.append(line)
+
+                if not stt.is_alive():
+                    print("ERROR: STT process died", file=sys.stderr)
+                    state = "idle"
+
+        # File ended — keep sending silence so STT's silence timeout fires
+        if args.audio_file and state == "conversing":
+            print("Audio file ended, waiting for STT...")
+            silence = np.zeros(CHUNK_SAMPLES, dtype=np.float32)
+            deadline = time.time() + 15
+            while state == "conversing" and time.time() < deadline:
+                audio.broadcast(silence.tobytes())
                 stt.drain_stderr()
-
-                if state == "idle":
-                    conf = hotword.poll_detection()
-                    if conf is not None:
-                        play_beep()
-                        print(f"\n*** Wake word detected (conf={conf:.3f}) ***")
-                        agent_ctx = fetch_stt_context(ctx_url) if ctx_url else ""
-                        parts = [p for p in [stt_initial_prompt, agent_ctx] if p]
-                        context = "\n".join(parts)
-                        if context:
-                            print(f"  [context] {context}")
-                        state = "conversing"
-                        utterances = []
-                        stt.activate(context)
-                        hotword.drain()
-
-                elif state == "conversing":
-                    line = stt.poll_output()
-                    if line == "END":
-                        if utterances and chat_url:
-                            text = " ".join(utterances)
-                            print(f"  [sending] {text}")
-                            post_chat_message(chat_url, text, chat_payload)
-                        state = "idle"
-                        play_idle_beep()
-                        print(f"\nState: {state} — listening for wake word\n")
-                    elif line:
-                        print(f"  >> {line}")
-                        utterances.append(line)
-
-                    if not stt.is_alive():
-                        print("ERROR: STT process died", file=sys.stderr)
-                        state = "idle"
+                line = stt.poll_output()
+                if line == "END":
+                    if utterances and chat_url:
+                        text = " ".join(utterances)
+                        print(f"  [sending] {text}")
+                        post_chat_message(chat_url, text, chat_payload)
+                    state = "idle"
+                    play_idle_beep()
+                    print(f"\nState: {state} — listening for wake word\n")
+                elif line:
+                    print(f"  >> {line}")
+                    utterances.append(line)
+                else:
+                    time.sleep(CHUNK_MS / 1000)
+            sd.wait()  # let beep finish before shutdown
 
     except KeyboardInterrupt:
         pass
