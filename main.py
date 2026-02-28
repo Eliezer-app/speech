@@ -14,7 +14,9 @@ Architecture:
 Usage: python main.py
 """
 
+import json
 import os
+import select
 import signal
 import socket
 import subprocess
@@ -22,11 +24,11 @@ import sys
 import threading
 import time
 from pathlib import Path
-
-import select
+from urllib import request, error
 
 import numpy as np
 import sounddevice as sd
+import yaml
 
 _DIR = Path(__file__).resolve().parent
 SOCKET_PATH = "/tmp/speech-audio.sock"
@@ -182,10 +184,11 @@ class STTProcess:
             stderr=subprocess.PIPE,
         )
 
-    def activate(self):
-        """Send START to begin a listening session."""
+    def activate(self, context=""):
+        """Send START to begin a listening session, with optional context."""
         if self.proc and self.proc.poll() is None:
-            self.proc.stdin.write(b"START\n")
+            msg = json.dumps({"cmd": "START", "context": context})
+            self.proc.stdin.write(f"{msg}\n".encode())
             self.proc.stdin.flush()
 
     def poll_output(self):
@@ -219,6 +222,41 @@ class STTProcess:
         self.proc = None
 
 
+def load_agent_config():
+    """Load agent_config.yaml if it exists. Returns dict."""
+    path = _DIR / "agent_config.yaml"
+    if path.exists():
+        with open(path) as f:
+            return yaml.safe_load(f) or {}
+    return {}
+
+
+def fetch_stt_context(url):
+    """GET stt context from agent. Returns context string or ""."""
+    try:
+        req = request.Request(url)
+        with request.urlopen(req, timeout=3) as resp:
+            return resp.read().decode().strip()
+    except Exception as e:
+        print(f"  [agent] context fetch failed: {e}", file=sys.stderr, flush=True)
+        return ""
+
+
+def post_chat_message(url, text, payload_template=None):
+    """POST accumulated transcript to agent."""
+    try:
+        if payload_template:
+            body = payload_template.replace("%text%", text.replace('"', '\\"')).encode()
+        else:
+            body = json.dumps({"text": text}).encode()
+        req = request.Request(url, data=body,
+                              headers={"Content-Type": "application/json"})
+        with request.urlopen(req, timeout=10) as resp:
+            resp.read()
+    except Exception as e:
+        print(f"  [agent] chat post failed: {e}", file=sys.stderr, flush=True)
+
+
 def main():
     print("=== Speech Assistant ===\n")
 
@@ -235,6 +273,18 @@ def main():
     print("Hotword detector: started")
 
     state = "idle"  # idle | conversing
+    utterances = []  # accumulated transcriptions for current session
+
+    # Agent config
+    agent_cfg = load_agent_config()
+    stt_initial_prompt = agent_cfg.get("stt_initial_prompt", "")
+    ctx_url = agent_cfg.get("stt_context_url")
+    chat_url = agent_cfg.get("chat_message_url")
+    chat_payload = agent_cfg.get("chat_message_payload")
+    if ctx_url:
+        print(f"Agent context: {ctx_url}")
+    if chat_url:
+        print(f"Agent chat: {chat_url}")
 
     # Start STT once (model loads in background)
     stt = STTProcess(SOCKET_PATH)
@@ -284,18 +334,29 @@ def main():
                     if conf is not None:
                         play_beep()
                         print(f"\n*** Wake word detected (conf={conf:.3f}) ***")
+                        agent_ctx = fetch_stt_context(ctx_url) if ctx_url else ""
+                        parts = [p for p in [stt_initial_prompt, agent_ctx] if p]
+                        context = "\n".join(parts)
+                        if context:
+                            print(f"  [context] {context}")
                         state = "conversing"
-                        stt.activate()
+                        utterances = []
+                        stt.activate(context)
                         hotword.drain()
 
                 elif state == "conversing":
                     line = stt.poll_output()
                     if line == "END":
+                        if utterances and chat_url:
+                            text = " ".join(utterances)
+                            print(f"  [sending] {text}")
+                            post_chat_message(chat_url, text, chat_payload)
                         state = "idle"
                         play_idle_beep()
                         print(f"\nState: {state} — listening for wake word\n")
                     elif line:
                         print(f"  >> {line}")
+                        utterances.append(line)
 
                     if not stt.is_alive():
                         print("ERROR: STT process died", file=sys.stderr)
