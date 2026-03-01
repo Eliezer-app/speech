@@ -156,14 +156,32 @@ class HotwordProcess:
                 return conf
         return None
 
+    def wait_ready(self, timeout=30):
+        """Block until hotword process prints 'ready' on stderr."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self.proc.poll() is not None:
+                err = self.proc.stderr.read().decode()
+                raise RuntimeError(f"Hotword process died during startup:\n{err}")
+            ready, _, _ = select.select([self.proc.stderr], [], [], 0.5)
+            if ready:
+                line = self.proc.stderr.readline().decode().rstrip()
+                if line:
+                    print(f"  [hotword] {line}", file=sys.stderr, flush=True)
+                if "ready" in line.lower():
+                    return
+        raise RuntimeError("Hotword process did not become ready in time")
+
     def drain(self):
         """Discard any buffered detection lines."""
-        import select
         while True:
             ready, _, _ = select.select([self.proc.stdout], [], [], 0)
             if not ready:
                 break
             self.proc.stdout.readline()
+
+    def is_alive(self):
+        return self.proc is not None and self.proc.poll() is None
 
     def stop(self):
         if self.proc and self.proc.poll() is None:
@@ -386,6 +404,15 @@ def main():
 
     print("=== Speech Assistant ===\n")
 
+    # Preflight checks
+    classifier = _DIR / "hotword" / "output" / "classifier.onnx"
+    if not classifier.exists():
+        print(f"ERROR: {classifier} not found.\n"
+              "Train the hotword model (cd hotword && make train) "
+              "or copy classifier.onnx into hotword/output/.",
+              file=sys.stderr, flush=True)
+        return
+
     # Start audio server
     audio = AudioServer(SOCKET_PATH)
     accept_thread = threading.Thread(target=audio.accept_loop, daemon=True)
@@ -446,17 +473,11 @@ def main():
         hotword.stop()
         audio.close()
 
-    # Quick health check
-    time.sleep(1)
-    rc = hotword.proc.poll()
-    if rc is not None:
-        print(f"ERROR: hotword subprocess exited with code {rc}")
-        out = hotword.proc.stdout.read()
-        if out:
-            print(f"  stdout: {out}")
-        err = hotword.proc.stderr.read()
-        if err:
-            print(f"  stderr: {err}")
+    # Wait for hotword to be ready
+    try:
+        hotword.wait_ready()
+    except RuntimeError as e:
+        print(f"ERROR: {e}", file=sys.stderr, flush=True)
         shutdown()
         return
     print(f"\nState: {state} — listening for wake word\n")
@@ -511,6 +532,10 @@ def main():
                 print(f"  [speak] done, state: {state}")
 
             if state == "idle":
+                if not hotword.is_alive():
+                    print("ERROR: hotword process died", file=sys.stderr, flush=True)
+                    running = False
+                    break
                 conf = hotword.poll_detection()
                 if conf is not None:
                     play_beep()
