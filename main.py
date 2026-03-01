@@ -229,6 +229,22 @@ class STTProcess:
             return line if line else None
         return None
 
+    def wait_ready(self, timeout=120):
+        """Block until STT process prints 'ready' on stderr."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self.proc.poll() is not None:
+                err = self.proc.stderr.read().decode()
+                raise RuntimeError(f"STT process died during startup:\n{err}")
+            ready, _, _ = select.select([self.proc.stderr], [], [], 0.5)
+            if ready:
+                line = self.proc.stderr.readline().decode().rstrip()
+                if line:
+                    print(f"  [stt] {line}", file=sys.stderr, flush=True)
+                if "ready" in line.lower():
+                    return
+        raise RuntimeError("STT process did not become ready in time")
+
     def drain_stderr(self):
         """Non-blocking drain of stderr, print to our stderr."""
         if self.proc is None:
@@ -446,12 +462,10 @@ def main():
     # Start STT once (model loads in background)
     stt = STTProcess(SOCKET_PATH)
     stt.start()
-    print("STT: starting (loading models)...")
 
     # Start TTS
     tts = TTSProcess()
     tts.start()
-    print("TTS: starting...")
 
     # Start HTTP server for /speak
     http_server = start_http_server(listen_port)
@@ -476,9 +490,10 @@ def main():
         hotword.stop()
         audio.close()
 
-    # Wait for hotword to be ready
+    # Wait for subprocesses to be ready
     try:
         hotword.wait_ready()
+        stt.wait_ready()
     except RuntimeError as e:
         print(f"ERROR: {e}", file=sys.stderr, flush=True)
         shutdown()
@@ -568,8 +583,9 @@ def main():
                     utterances.append(line)
 
                 if not stt.is_alive():
-                    print("ERROR: STT process died", file=sys.stderr)
-                    state = "idle"
+                    print("ERROR: STT process died", file=sys.stderr, flush=True)
+                    running = False
+                    break
 
         # File ended — keep sending silence so STT's silence timeout fires
         if args.audio_file and state == "conversing":
