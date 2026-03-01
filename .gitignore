@@ -1,5 +1,6 @@
 hotword/
 stt/
+tts/
 .venv/
 venv/
 __pycache__/

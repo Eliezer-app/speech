@@ -17,6 +17,7 @@ Usage: python main.py
 import argparse
 import json
 import os
+import queue
 import select
 import signal
 import socket
@@ -24,6 +25,7 @@ import subprocess
 import sys
 import threading
 import time
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from urllib import request, error
 
@@ -67,6 +69,8 @@ class AudioServer:
         self.sock_path = sock_path
         self.clients = []
         self.lock = threading.Lock()
+        self.muted = False
+        self._silence = None
         self._cleanup_socket()
         self.server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.server.bind(sock_path)
@@ -92,7 +96,12 @@ class AudioServer:
                 break
 
     def broadcast(self, data):
-        """Send audio bytes to all connected clients. Drop dead ones."""
+        """Send audio bytes to all connected clients. Drop dead ones.
+        When muted, sends silence instead."""
+        if self.muted:
+            if self._silence is None or len(self._silence) != len(data):
+                self._silence = b'\x00' * len(data)
+            data = self._silence
         with self.lock:
             alive = []
             for c in self.clients:
@@ -223,6 +232,59 @@ class STTProcess:
         self.proc = None
 
 
+class TTSProcess:
+    """Manages the persistent TTS subprocess.
+
+    Starts once at boot. Send text on stdin, it speaks and prints DONE.
+    """
+
+    def __init__(self):
+        self.proc = None
+
+    def start(self):
+        self.proc = subprocess.Popen(
+            [str(_DIR / "tts" / "run")],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+    def speak(self, text):
+        """Send text to TTS. Non-blocking — poll for DONE."""
+        if self.proc and self.proc.poll() is None:
+            self.proc.stdin.write(f"{text}\n".encode())
+            self.proc.stdin.flush()
+
+    def poll_done(self):
+        """Non-blocking check if TTS finished speaking."""
+        if self.proc is None or self.proc.poll() is not None:
+            return False
+        ready, _, _ = select.select([self.proc.stdout], [], [], 0)
+        if ready:
+            line = self.proc.stdout.readline().decode().strip()
+            return line == "DONE"
+        return False
+
+    def drain_stderr(self):
+        if self.proc is None:
+            return
+        ready, _, _ = select.select([self.proc.stderr], [], [], 0)
+        while ready:
+            line = self.proc.stderr.readline().decode().rstrip()
+            if line:
+                print(f"  [tts] {line}", file=sys.stderr, flush=True)
+            ready, _, _ = select.select([self.proc.stderr], [], [], 0)
+
+    def is_alive(self):
+        return self.proc is not None and self.proc.poll() is None
+
+    def stop(self):
+        if self.proc and self.proc.poll() is None:
+            self.proc.terminate()
+            self.proc.wait(timeout=3)
+        self.proc = None
+
+
 def load_agent_config(path):
     """Load agent config YAML if it exists. Returns dict."""
     p = Path(path)
@@ -256,6 +318,41 @@ def post_chat_message(url, text, payload_template=None):
             resp.read()
     except Exception as e:
         print(f"  [agent] chat post failed: {e}", file=sys.stderr, flush=True)
+
+
+speak_queue = queue.Queue()
+
+
+class SpeakHandler(BaseHTTPRequestHandler):
+    """HTTP handler for /speak endpoint."""
+
+    def do_POST(self):
+        if self.path == "/speak":
+            length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(length).decode()
+            try:
+                data = json.loads(body)
+                text = data.get("text", "")
+            except json.JSONDecodeError:
+                text = body.strip()
+            if text:
+                speak_queue.put(text)
+            self.send_response(200)
+            self.end_headers()
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, fmt, *args):
+        pass
+
+
+def start_http_server(port):
+    HTTPServer.allow_reuse_address = True
+    server = HTTPServer(("127.0.0.1", port), SpeakHandler)
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+    return server
 
 
 def audio_chunks_from_file(path):
@@ -301,7 +398,7 @@ def main():
     hotword.start()
     print("Hotword detector: started")
 
-    state = "idle"  # idle | conversing
+    state = "idle"  # idle | conversing | speaking
     utterances = []  # accumulated transcriptions for current session
 
     # Agent config
@@ -310,6 +407,7 @@ def main():
     ctx_url = agent_cfg.get("stt_context_url")
     chat_url = agent_cfg.get("chat_message_url")
     chat_payload = agent_cfg.get("chat_message_payload")
+    listen_port = agent_cfg.get("listen_port", 8124)
     if ctx_url:
         print(f"Agent context: {ctx_url}")
     if chat_url:
@@ -320,6 +418,15 @@ def main():
     stt.start()
     print("STT: starting (loading models)...")
 
+    # Start TTS
+    tts = TTSProcess()
+    tts.start()
+    print("TTS: starting...")
+
+    # Start HTTP server for /speak
+    http_server = start_http_server(listen_port)
+    print(f"Listening on http://127.0.0.1:{listen_port}/speak")
+
     running = True
 
     def handle_signal(*_):
@@ -329,8 +436,12 @@ def main():
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)
 
+    prev_state_before_speak = "idle"
+
     def shutdown():
         print("\nShutting down...")
+        http_server.shutdown()
+        tts.stop()
         stt.stop()
         hotword.stop()
         audio.close()
@@ -369,6 +480,35 @@ def main():
             audio.broadcast(chunk.tobytes())
 
             stt.drain_stderr()
+            tts.drain_stderr()
+
+            # Check speak queue — agent can push text at any time
+            try:
+                text = speak_queue.get_nowait()
+                print(f"  [speak] {text}")
+                if state == "conversing":
+                    # Interrupt STT session
+                    stt.proc.stdin.write(b'{"cmd":"STOP"}\n')
+                    stt.proc.stdin.flush()
+                prev_state_before_speak = state
+                state = "speaking"
+                audio.muted = True
+                tts.speak(text)
+            except queue.Empty:
+                pass
+
+            # TTS finished speaking
+            if state == "speaking" and tts.poll_done():
+                audio.muted = False
+                hotword.drain()
+                state = prev_state_before_speak
+                if state == "conversing":
+                    # Resume STT
+                    agent_ctx = fetch_stt_context(ctx_url) if ctx_url else ""
+                    parts = [p for p in [stt_initial_prompt, agent_ctx] if p]
+                    context = "\n".join(parts)
+                    stt.activate(context)
+                print(f"  [speak] done, state: {state}")
 
             if state == "idle":
                 conf = hotword.poll_detection()
