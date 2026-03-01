@@ -439,7 +439,7 @@ def main():
                 if np.all(audio_test == 0):
                     raise RuntimeError(
                         "Microphone returns silence — no audio access "
-                        "(running via SSH?). Use --audio-file or run locally.")
+                        "(running via SSH?)")
         except sd.PortAudioError as e:
             print(f"ERROR: No microphone available: {e}",
                   file=sys.stderr, flush=True)
