@@ -406,10 +406,13 @@ def main():
 
     # Preflight checks
     classifier = _DIR / "hotword" / "output" / "classifier.onnx"
-    if not classifier.exists():
-        print(f"ERROR: {classifier} not found.\n"
+    classifier_data = _DIR / "hotword" / "output" / "classifier.onnx.data"
+    missing = [f for f in [classifier, classifier_data] if not f.exists()]
+    if missing:
+        names = ", ".join(f.name for f in missing)
+        print(f"ERROR: Missing hotword model files: {names}\n"
               "Train the hotword model (cd hotword && make train) "
-              "or copy classifier.onnx into hotword/output/.",
+              "or copy classifier.onnx + classifier.onnx.data into hotword/output/.",
               file=sys.stderr, flush=True)
         return
 
