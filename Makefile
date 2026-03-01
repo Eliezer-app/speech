@@ -4,9 +4,9 @@ PYTHON ?= python3
 
 # Clone subprojects and prepare all venvs
 install:
-	test -d hotword || git clone git@github.com:Eliezer-app/hotword.git
-	test -d stt || git clone git@github.com:Eliezer-app/stt.git
-	test -d tts || git clone git@github.com:Eliezer-app/tts.git
+	test -d hotword || git clone https://github.com/Eliezer-app/hotword.git
+	test -d stt || git clone https://github.com/Eliezer-app/stt.git
+	test -d tts || git clone https://github.com/Eliezer-app/tts.git
 	$(MAKE) prepare
 
 # Create venv and install deps for all projects
