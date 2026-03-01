@@ -432,6 +432,22 @@ def main():
               file=sys.stderr, flush=True)
         return
 
+    if not args.audio_file:
+        try:
+            with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32") as stream:
+                audio_test, _ = stream.read(CHUNK_SAMPLES * 5)
+                if np.all(audio_test == 0):
+                    raise RuntimeError(
+                        "Microphone returns silence — no audio access "
+                        "(running via SSH?). Use --audio-file or run locally.")
+        except sd.PortAudioError as e:
+            print(f"ERROR: No microphone available: {e}",
+                  file=sys.stderr, flush=True)
+            return
+        except RuntimeError as e:
+            print(f"ERROR: {e}", file=sys.stderr, flush=True)
+            return
+
     # Start audio server
     audio = AudioServer(SOCKET_PATH)
     accept_thread = threading.Thread(target=audio.accept_loop, daemon=True)
