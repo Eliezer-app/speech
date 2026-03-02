@@ -339,13 +339,34 @@ def fetch_stt_context(url):
         return ""
 
 
+MAX_SPEAK_WORDS = 100
+
+
+def extract_voice(text):
+    """Extract spoken part from agent response.
+    Speak everything before [Print] (strip [Voice] tag if present), capped at 30 words.
+    No [Print] → speak first 30 words."""
+    if "[Print]" in text:
+        before = text.split("[Print]")[0].strip()
+    else:
+        before = text.strip()
+    if before.startswith("[Voice]"):
+        before = before[len("[Voice]"):].strip()
+    if not before:
+        return ""
+    words = before.split()
+    return " ".join(words[:MAX_SPEAK_WORDS])
+
+
 def post_chat_message(url, text, payload_template=None):
-    """POST accumulated transcript to agent."""
+    """POST accumulated transcript to agent, prefixed with [Voice]."""
     try:
+        voice_text = f"[Voice] {text}"
+
         if payload_template:
-            body = payload_template.replace("%text%", text.replace('"', '\\"')).encode()
+            body = payload_template.replace("%text%", voice_text.replace('"', '\\"')).encode()
         else:
-            body = json.dumps({"text": text}).encode()
+            body = json.dumps({"text": voice_text}).encode()
         req = request.Request(url, data=body,
                               headers={"Content-Type": "application/json"})
         with request.urlopen(req, timeout=10) as resp:
@@ -366,11 +387,18 @@ class SpeakHandler(BaseHTTPRequestHandler):
             body = self.rfile.read(length).decode()
             try:
                 data = json.loads(body)
-                text = data.get("text", "")
             except json.JSONDecodeError:
-                text = body.strip()
-            if text:
-                speak_queue.put(text)
+                self.send_response(400)
+                self.end_headers()
+                return
+            if data.get("role") != "agent":
+                self.send_response(400)
+                self.end_headers()
+                return
+            text = data.get("content", "")
+            voice = extract_voice(text)
+            if voice:
+                speak_queue.put(voice)
             self.send_response(200)
             self.end_headers()
         else:
@@ -434,12 +462,19 @@ def main():
 
     if not args.audio_file:
         try:
-            with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32") as stream:
-                audio_test, _ = stream.read(CHUNK_SAMPLES * 5)
-                if np.all(audio_test == 0):
-                    raise RuntimeError(
-                        "Microphone returns silence — no audio access "
-                        "(running via SSH?)")
+            result = [None]
+            def _mic_test():
+                with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32") as stream:
+                    result[0], _ = stream.read(CHUNK_SAMPLES * 5)
+            t = threading.Thread(target=_mic_test, daemon=True)
+            t.start()
+            t.join(timeout=3)
+            if t.is_alive() or result[0] is None:
+                raise RuntimeError(
+                    "Microphone not responding — no audio access (running via SSH?)")
+            if np.all(result[0] == 0):
+                raise RuntimeError(
+                    "Microphone returns silence — no audio access (running via SSH?)")
         except sd.PortAudioError as e:
             print(f"ERROR: No microphone available: {e}",
                   file=sys.stderr, flush=True)

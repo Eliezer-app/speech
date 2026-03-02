@@ -2,7 +2,7 @@
 
 # Static initial prompt for whisper STT (always prepended)
 # Agent context from stt_context_url is appended after this
-stt_initial_prompt: "Sand Hollow, Southern Utah, Eliezer"
+stt_initial_prompt: ""
 
 # GET: called on hotword detection, returns plain text context
 # used as initial_prompt for whisper STT
@@ -10,5 +10,5 @@ stt_initial_prompt: "Sand Hollow, Southern Utah, Eliezer"
 
 # POST: called after silence timeout with accumulated transcript
 # %text% is replaced with the accumulated utterances
-#chat_message_url: http://localhost:8000/chat
-#chat_message_payload: '{"message": "%text%"}'
+chat_message_url: http://127.0.0.1:3104/slave/send
+chat_message_payload: '{"role":"user", "content": "%text%"}'

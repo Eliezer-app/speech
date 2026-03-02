@@ -1,12 +1,20 @@
 PYTHON ?= python3
 
-.PHONY: install prepare run record mock-agent test clean
+.PHONY: install update prepare run record mock-agent test clean
 
 # Clone subprojects and prepare all venvs
 install:
 	test -d hotword || git clone https://github.com/Eliezer-app/hotword.git
 	test -d stt || git clone https://github.com/Eliezer-app/stt.git
 	test -d tts || git clone https://github.com/Eliezer-app/tts.git
+	$(MAKE) prepare
+
+# Pull all repos and re-prepare
+update:
+	git pull
+	git -C hotword pull
+	git -C stt pull
+	git -C tts pull
 	$(MAKE) prepare
 
 # Create venv and install deps for all projects
