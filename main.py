@@ -358,15 +358,23 @@ def extract_voice(text):
     return " ".join(words[:MAX_SPEAK_WORDS])
 
 
-def post_chat_message(url, text, payload_template=None):
-    """POST accumulated transcript to agent, prefixed with [Voice]."""
+def post_chat_message(url, text, payload_template=None, partial=False):
+    """POST transcript to chat, prefixed with [Voice]."""
     try:
         voice_text = f"[Voice] {text}"
 
         if payload_template:
-            body = payload_template.replace("%text%", voice_text.replace('"', '\\"')).encode()
+            body_str = payload_template.replace("%text%", voice_text.replace('"', '\\"'))
+            if partial:
+                body_obj = json.loads(body_str)
+                body_obj["partial"] = True
+                body_str = json.dumps(body_obj)
+            body = body_str.encode()
         else:
-            body = json.dumps({"text": voice_text}).encode()
+            payload = {"text": voice_text}
+            if partial:
+                payload["partial"] = True
+            body = json.dumps(payload).encode()
         req = request.Request(url, data=body,
                               headers={"Content-Type": "application/json"})
         with request.urlopen(req, timeout=10) as resp:
@@ -616,6 +624,8 @@ def main():
                         print(f"  [context] {context}")
                     state = "conversing"
                     utterances = []
+                    if chat_url:
+                        post_chat_message(chat_url, "listening...", chat_payload, partial=True)
                     stt.activate(context)
                     hotword.drain()
 
@@ -632,6 +642,9 @@ def main():
                 elif line:
                     print(f"  >> {line}")
                     utterances.append(line)
+                    if chat_url:
+                        text = " ".join(utterances)
+                        post_chat_message(chat_url, text, chat_payload, partial=True)
 
                 if not stt.is_alive():
                     print("ERROR: STT process died", file=sys.stderr, flush=True)
@@ -658,6 +671,9 @@ def main():
                 elif line:
                     print(f"  >> {line}")
                     utterances.append(line)
+                    if chat_url:
+                        text = " ".join(utterances)
+                        post_chat_message(chat_url, text, chat_payload, partial=True)
                 else:
                     time.sleep(CHUNK_MS / 1000)
             sd.wait()  # let beep finish before shutdown
