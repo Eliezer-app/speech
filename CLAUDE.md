@@ -4,5 +4,6 @@
 
 ## Rules
 
-- Multi-repo project: speech/, hotword/, stt/, tts/ each have their own .git. NEVER run git commands without `cd /absolute/path &&` prefix. Example: `cd /Users/victor/projects/speech/stt && git status`
+- Multi-repo project: speech/, hotword/, stt/, tts/ each have their own .git. Always use `git -C /absolute/path` for git commands.
 - Always use `.venv/bin/pip` for installs, never bare `pip`
+- **Before committing:** run `git status` on ALL repos. Review every outstanding change (staged, unstaged, untracked). Do NOT commit if anything is unclear — ask first. Every change must be accounted for in the commit.
