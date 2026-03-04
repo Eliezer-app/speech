@@ -331,12 +331,15 @@ class TTSProcess:
 
 
 def load_config(path):
-    """Load agent config YAML if it exists. Returns dict."""
+    """Load config YAML. Exits if not found."""
     p = Path(path)
-    if p.exists():
-        with open(p) as f:
-            return yaml.safe_load(f) or {}
-    return {}
+    if not p.exists():
+        print(f"ERROR: Config not found: {p}\n"
+              "Copy config.example.yaml to config.yaml and edit it.",
+              file=sys.stderr, flush=True)
+        sys.exit(1)
+    with open(p) as f:
+        return yaml.safe_load(f) or {}
 
 
 def fetch_stt_context(url):
