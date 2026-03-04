@@ -10,3 +10,9 @@ stt_context_url: http://127.0.0.1:3100/stt-prompt
 
 # POST: called after silence timeout with accumulated transcript
 chat_message_url: http://127.0.0.1:3100/user/send
+
+# Screen control — dims after idle, brightens on activity
+screen:
+  idle_timeout: 7
+  on_command: ""
+  off_command: ""

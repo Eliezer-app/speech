@@ -128,6 +128,18 @@ class AudioServer:
         self._cleanup_socket()
 
 
+def stop_proc(proc, name="process"):
+    """Terminate a subprocess, escalating to kill if needed."""
+    if proc and proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=4)
+        except subprocess.TimeoutExpired:
+            print(f"  {name} not responding, killing", file=sys.stderr, flush=True)
+            proc.kill()
+            proc.wait()
+
+
 class HotwordProcess:
     """Manages the hotword detector subprocess."""
 
@@ -189,9 +201,7 @@ class HotwordProcess:
         return self.proc is not None and self.proc.poll() is None
 
     def stop(self):
-        if self.proc and self.proc.poll() is None:
-            self.proc.terminate()
-            self.proc.wait(timeout=3)
+        stop_proc(self.proc, "hotword")
         self.proc = None
 
 
@@ -265,9 +275,7 @@ class STTProcess:
         return self.proc is not None and self.proc.poll() is None
 
     def stop(self):
-        if self.proc and self.proc.poll() is None:
-            self.proc.terminate()
-            self.proc.wait(timeout=3)
+        stop_proc(self.proc, "stt")
         self.proc = None
 
 
@@ -318,9 +326,7 @@ class TTSProcess:
         return self.proc is not None and self.proc.poll() is None
 
     def stop(self):
-        if self.proc and self.proc.poll() is None:
-            self.proc.terminate()
-            self.proc.wait(timeout=3)
+        stop_proc(self.proc, "tts")
         self.proc = None
 
 
@@ -483,6 +489,20 @@ def main():
                         help="Agent config YAML (default: agent_config.yaml)")
     args = parser.parse_args()
 
+    running = True
+    _sigcount = 0
+
+    def handle_signal(*_):
+        nonlocal running, _sigcount
+        _sigcount += 1
+        running = False
+        if _sigcount >= 2:
+            print("\nForce exit.", file=sys.stderr, flush=True)
+            os._exit(1)
+
+    signal.signal(signal.SIGINT, handle_signal)
+    signal.signal(signal.SIGTERM, handle_signal)
+
     print("=== Speech Assistant ===\n")
 
     # Preflight checks
@@ -532,7 +552,6 @@ def main():
     hotword.start()
     print("Hotword detector: started")
 
-    state = "idle"  # idle | conversing | speaking
     utterances = []  # accumulated transcriptions for current session
 
     # Agent config
@@ -541,6 +560,42 @@ def main():
     ctx_url = agent_cfg.get("stt_context_url")
     chat_url = agent_cfg.get("chat_message_url")
     listen_port = agent_cfg.get("listen_port", 8124)
+
+    # Screen control
+    screen_cfg = agent_cfg.get("screen", {})
+    screen_on_cmd = screen_cfg.get("on_command")
+    screen_off_cmd = screen_cfg.get("off_command")
+    screen_idle_timeout = screen_cfg.get("idle_timeout", 20)
+    screen_is_on = True
+    screen_timer = None
+
+    def screen_on():
+        nonlocal screen_is_on
+        if screen_on_cmd and not screen_is_on:
+            subprocess.Popen(screen_on_cmd, shell=True)
+            screen_is_on = True
+
+    def screen_off():
+        nonlocal screen_is_on
+        if screen_off_cmd and screen_is_on:
+            subprocess.Popen(screen_off_cmd, shell=True)
+            screen_is_on = False
+
+    state = "idle"
+
+    def set_state(new):
+        nonlocal state, screen_timer
+        state = new
+        if state != "idle":
+            if screen_timer:
+                screen_timer.cancel()
+                screen_timer = None
+            screen_on()
+        else:
+            if screen_on_cmd:
+                screen_timer = threading.Timer(screen_idle_timeout, screen_off)
+                screen_timer.daemon = True
+                screen_timer.start()
     if ctx_url:
         print(f"Agent context: {ctx_url}")
     if chat_url:
@@ -558,19 +613,12 @@ def main():
     http_server = start_http_server(listen_port)
     print(f"Listening on http://127.0.0.1:{listen_port}/speak")
 
-    running = True
-
-    def handle_signal(*_):
-        nonlocal running
-        running = False
-
-    signal.signal(signal.SIGINT, handle_signal)
-    signal.signal(signal.SIGTERM, handle_signal)
-
     prev_state_before_speak = "idle"
 
     def shutdown():
         print("\nShutting down...")
+        if screen_timer:
+            screen_timer.cancel()
         http_server.shutdown()
         tts.stop()
         stt.stop()
@@ -585,6 +633,7 @@ def main():
         print(f"ERROR: {e}", file=sys.stderr, flush=True)
         shutdown()
         return
+    set_state("idle")
     print(f"\nState: {state} — listening for wake word\n")
 
     def mic_chunks():
@@ -617,7 +666,7 @@ def main():
                     stt.proc.stdin.write(b'{"cmd":"STOP"}\n')
                     stt.proc.stdin.flush()
                 prev_state_before_speak = state
-                state = "speaking"
+                set_state("speaking")
                 audio.muted = True
                 tts.speak(text)
             except queue.Empty:
@@ -627,7 +676,7 @@ def main():
             if state == "speaking" and tts.poll_done():
                 audio.muted = False
                 hotword.drain()
-                state = prev_state_before_speak
+                set_state(prev_state_before_speak)
                 if state == "conversing":
                     # Resume STT
                     agent_ctx = fetch_stt_context(ctx_url) if ctx_url else ""
@@ -650,7 +699,7 @@ def main():
                     context = "\n".join(parts)
                     if context:
                         print(f"  [context] {context}")
-                    state = "conversing"
+                    set_state("conversing")
                     utterances = []
                     if chat_url:
                         post_chat_message(chat_url, "listening...", partial=True)
@@ -664,7 +713,7 @@ def main():
                         text = " ".join(utterances)
                         print(f"  [sending] {text}")
                         post_chat_message(chat_url, text)
-                    state = "idle"
+                    set_state("idle")
                     play_idle_beep()
                     print(f"\nState: {state} — listening for wake word\n")
                 elif line:
@@ -693,7 +742,7 @@ def main():
                         text = " ".join(utterances)
                         print(f"  [sending] {text}")
                         post_chat_message(chat_url, text)
-                    state = "idle"
+                    set_state("idle")
                     play_idle_beep()
                     print(f"\nState: {state} — listening for wake word\n")
                 elif line:
