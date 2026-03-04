@@ -330,7 +330,7 @@ class TTSProcess:
         self.proc = None
 
 
-def load_agent_config(path):
+def load_config(path):
     """Load agent config YAML if it exists. Returns dict."""
     p = Path(path)
     if p.exists():
@@ -485,8 +485,8 @@ def main():
     parser.add_argument("--audio-file", help="WAV file instead of mic")
     parser.add_argument("--record-hotword", action="store_true",
                         help="Record hotword hits and near-misses")
-    parser.add_argument("--config", default=str(_DIR / "agent_config.yaml"),
-                        help="Agent config YAML (default: agent_config.yaml)")
+    parser.add_argument("--config", default=str(_DIR / "config.yaml"),
+                        help="Agent config YAML (default: config.yaml)")
     args = parser.parse_args()
 
     running = True
@@ -555,14 +555,14 @@ def main():
     utterances = []  # accumulated transcriptions for current session
 
     # Agent config
-    agent_cfg = load_agent_config(args.config)
-    stt_initial_prompt = agent_cfg.get("stt_initial_prompt", "")
-    ctx_url = agent_cfg.get("stt_context_url")
-    chat_url = agent_cfg.get("chat_message_url")
-    listen_port = agent_cfg.get("listen_port", 8124)
+    cfg = load_config(args.config)
+    stt_initial_prompt = cfg.get("stt_initial_prompt", "")
+    ctx_url = cfg.get("stt_context_url")
+    chat_url = cfg.get("chat_message_url")
+    listen_port = cfg.get("listen_port", 8124)
 
     # Screen control
-    screen_cfg = agent_cfg.get("screen", {})
+    screen_cfg = cfg.get("screen", {})
     screen_on_cmd = screen_cfg.get("on_command")
     screen_off_cmd = screen_cfg.get("off_command")
     screen_idle_timeout = screen_cfg.get("idle_timeout", 20)

@@ -49,7 +49,7 @@ def run_server(server):
 
 def main():
     wav = _DIR / "test_audio.wav"
-    config = _DIR / "agent_config.test.yaml"
+    config = _DIR / "config.test.yaml"
     if not wav.exists():
         print(f"FAIL: {wav} not found. Run: make record")
         sys.exit(1)

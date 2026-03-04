@@ -5,4 +5,4 @@ tts/
 venv/
 __pycache__/
 test_audio_pcm.wav
-agent_config.yaml
+config.yaml

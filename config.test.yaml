@@ -1,0 +1,3 @@
+stt_initial_prompt: "Sand Hollow, Southern Utah, Eliezer"
+stt_context_url: http://127.0.0.1:8123/stt-context
+chat_message_url: http://127.0.0.1:8123/chat
