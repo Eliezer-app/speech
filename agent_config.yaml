@@ -9,6 +9,4 @@ stt_initial_prompt: ""
 stt_context_url: http://127.0.0.1:3100/stt-prompt
 
 # POST: called after silence timeout with accumulated transcript
-# %text% is replaced with the accumulated utterances
 chat_message_url: http://127.0.0.1:3100/user/send
-chat_message_payload: '{"role":"user", "content": "%text%"}'

@@ -18,6 +18,7 @@ import argparse
 import json
 import os
 import queue
+import re
 import select
 import signal
 import socket
@@ -130,13 +131,17 @@ class AudioServer:
 class HotwordProcess:
     """Manages the hotword detector subprocess."""
 
-    def __init__(self, sock_path):
+    def __init__(self, sock_path, record=False):
         self.sock_path = sock_path
+        self.record = record
         self.proc = None
 
     def start(self):
+        cmd = [str(_DIR / "hotword" / "run"), "--audio-source", self.sock_path]
+        if self.record:
+            cmd.append("--record")
         self.proc = subprocess.Popen(
-            [str(_DIR / "hotword" / "run"), "--audio-source", self.sock_path],
+            cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
@@ -342,39 +347,61 @@ def fetch_stt_context(url):
 MAX_SPEAK_WORDS = 100
 
 
-def extract_voice(text):
-    """Extract spoken part from agent response.
-    Speak everything before [Print] (strip [Voice] tag if present), capped at 30 words.
-    No [Print] → speak first 30 words."""
-    if "[Print]" in text:
-        before = text.split("[Print]")[0].strip()
-    else:
-        before = text.strip()
-    if before.startswith("[Voice]"):
-        before = before[len("[Voice]"):].strip()
-    if not before:
-        return ""
-    words = before.split()
-    return " ".join(words[:MAX_SPEAK_WORDS])
+def strip_markdown(text):
+    """Strip markdown formatting for TTS. Produces clean, punctuated, capitalized text."""
+    # Replace tables with "Table."
+    text = re.sub(r'(\|[^\n]+\|\n?)+', 'Table. ', text)
+    # Remove code blocks
+    text = re.sub(r'```[^`]*```', '', text, flags=re.DOTALL)
+    # Remove inline code
+    text = re.sub(r'`([^`]+)`', r'\1', text)
+    # Remove images
+    text = re.sub(r'!\[([^\]]*)\]\([^)]+\)', r'\1', text)
+    # Convert links to just text
+    text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)
+    # Remove headings markers
+    text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
+    # Remove bold/italic
+    text = re.sub(r'\*{1,3}([^*]+)\*{1,3}', r'\1', text)
+    text = re.sub(r'_{1,3}([^_]+)_{1,3}', r'\1', text)
+    # Remove strikethrough
+    text = re.sub(r'~~([^~]+)~~', r'\1', text)
+    # Numbered lists: "1. item" → "1, Item."
+    def _numbered_item(m):
+        num = m.group(1)
+        item = m.group(2).strip()
+        if item:
+            item = item[0].upper() + item[1:]
+            if not item.endswith(('.', '!', '?')):
+                item += '.'
+        return f'{num}, {item}'
+    text = re.sub(r'^[\s]*(\d+)\.\s+(.+)$', _numbered_item, text, flags=re.MULTILINE)
+    # Bullet lists: "- item" → "Item."
+    def _bullet_item(m):
+        item = m.group(1).strip()
+        if item:
+            item = item[0].upper() + item[1:]
+            if not item.endswith(('.', '!', '?')):
+                item += '.'
+        return item
+    text = re.sub(r'^[\s]*[-*+]\s+(.+)$', _bullet_item, text, flags=re.MULTILINE)
+    # Remove horizontal rules
+    text = re.sub(r'^[-*_]{3,}\s*$', '', text, flags=re.MULTILINE)
+    # Remove blockquote markers
+    text = re.sub(r'^>\s+', '', text, flags=re.MULTILINE)
+    # Collapse newlines into spaces
+    text = re.sub(r'\n+', ' ', text)
+    text = re.sub(r'\s{2,}', ' ', text)
+    return text.strip()
 
 
-def post_chat_message(url, text, payload_template=None, partial=False):
-    """POST transcript to chat, prefixed with [Voice]."""
+def post_chat_message(url, text, partial=False):
+    """POST transcript to chat with media: voice."""
     try:
-        voice_text = f"[Voice] {text}"
-
-        if payload_template:
-            body_str = payload_template.replace("%text%", voice_text.replace('"', '\\"'))
-            if partial:
-                body_obj = json.loads(body_str)
-                body_obj["partial"] = True
-                body_str = json.dumps(body_obj)
-            body = body_str.encode()
-        else:
-            payload = {"text": voice_text}
-            if partial:
-                payload["partial"] = True
-            body = json.dumps(payload).encode()
+        payload = {"role": "user", "content": text, "media": "voice"}
+        if partial:
+            payload["partial"] = True
+        body = json.dumps(payload).encode()
         req = request.Request(url, data=body,
                               headers={"Content-Type": "application/json"})
         with request.urlopen(req, timeout=10) as resp:
@@ -403,10 +430,10 @@ class SpeakHandler(BaseHTTPRequestHandler):
                 self.send_response(400)
                 self.end_headers()
                 return
-            text = data.get("content", "")
-            voice = extract_voice(text)
-            if voice:
-                speak_queue.put(voice)
+            text = strip_markdown(data.get("content", ""))
+            if text:
+                words = text.split()
+                speak_queue.put(" ".join(words[:MAX_SPEAK_WORDS]))
             self.send_response(200)
             self.end_headers()
         else:
@@ -450,6 +477,8 @@ def audio_chunks_from_file(path):
 def main():
     parser = argparse.ArgumentParser(description="Speech assistant orchestrator")
     parser.add_argument("--audio-file", help="WAV file instead of mic")
+    parser.add_argument("--record-hotword", action="store_true",
+                        help="Record hotword hits and near-misses")
     parser.add_argument("--config", default=str(_DIR / "agent_config.yaml"),
                         help="Agent config YAML (default: agent_config.yaml)")
     args = parser.parse_args()
@@ -499,7 +528,7 @@ def main():
 
     # Give the socket a moment, then start hotword detector
     time.sleep(0.2)
-    hotword = HotwordProcess(SOCKET_PATH)
+    hotword = HotwordProcess(SOCKET_PATH, record=args.record_hotword)
     hotword.start()
     print("Hotword detector: started")
 
@@ -511,7 +540,6 @@ def main():
     stt_initial_prompt = agent_cfg.get("stt_initial_prompt", "")
     ctx_url = agent_cfg.get("stt_context_url")
     chat_url = agent_cfg.get("chat_message_url")
-    chat_payload = agent_cfg.get("chat_message_payload")
     listen_port = agent_cfg.get("listen_port", 8124)
     if ctx_url:
         print(f"Agent context: {ctx_url}")
@@ -625,7 +653,7 @@ def main():
                     state = "conversing"
                     utterances = []
                     if chat_url:
-                        post_chat_message(chat_url, "listening...", chat_payload, partial=True)
+                        post_chat_message(chat_url, "listening...", partial=True)
                     stt.activate(context)
                     hotword.drain()
 
@@ -635,7 +663,7 @@ def main():
                     if utterances and chat_url:
                         text = " ".join(utterances)
                         print(f"  [sending] {text}")
-                        post_chat_message(chat_url, text, chat_payload)
+                        post_chat_message(chat_url, text)
                     state = "idle"
                     play_idle_beep()
                     print(f"\nState: {state} — listening for wake word\n")
@@ -644,7 +672,7 @@ def main():
                     utterances.append(line)
                     if chat_url:
                         text = " ".join(utterances)
-                        post_chat_message(chat_url, text, chat_payload, partial=True)
+                        post_chat_message(chat_url, text, partial=True)
 
                 if not stt.is_alive():
                     print("ERROR: STT process died", file=sys.stderr, flush=True)
@@ -664,7 +692,7 @@ def main():
                     if utterances and chat_url:
                         text = " ".join(utterances)
                         print(f"  [sending] {text}")
-                        post_chat_message(chat_url, text, chat_payload)
+                        post_chat_message(chat_url, text)
                     state = "idle"
                     play_idle_beep()
                     print(f"\nState: {state} — listening for wake word\n")
@@ -673,7 +701,7 @@ def main():
                     utterances.append(line)
                     if chat_url:
                         text = " ".join(utterances)
-                        post_chat_message(chat_url, text, chat_payload, partial=True)
+                        post_chat_message(chat_url, text, partial=True)
                 else:
                     time.sleep(CHUNK_MS / 1000)
             sd.wait()  # let beep finish before shutdown
