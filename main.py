@@ -569,20 +569,15 @@ def main():
     screen_on_cmd = screen_cfg.get("on_command")
     screen_off_cmd = screen_cfg.get("off_command")
     screen_idle_timeout = screen_cfg.get("idle_timeout", 20)
-    screen_is_on = True
     screen_timer = None
 
     def screen_on():
-        nonlocal screen_is_on
-        if screen_on_cmd and not screen_is_on:
+        if screen_on_cmd:
             subprocess.Popen(screen_on_cmd, shell=True)
-            screen_is_on = True
 
     def screen_off():
-        nonlocal screen_is_on
-        if screen_off_cmd and screen_is_on:
+        if screen_off_cmd:
             subprocess.Popen(screen_off_cmd, shell=True)
-            screen_is_on = False
 
     state = "idle"
 
