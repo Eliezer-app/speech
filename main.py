@@ -400,12 +400,14 @@ def strip_markdown(text):
     return text.strip()
 
 
-def post_chat_message(url, text, partial=False):
+def post_chat_message(url, text, partial=False, cancel=False):
     """POST transcript to chat with media: voice."""
     try:
         payload = {"role": "user", "content": text, "media": "voice"}
         if partial:
             payload["partial"] = True
+        if cancel:
+            payload["cancel"] = True
         body = json.dumps(payload).encode()
         req = request.Request(url, data=body,
                               headers={"Content-Type": "application/json"})
@@ -710,6 +712,8 @@ def main():
                         text = " ".join(utterances)
                         print(f"  [sending] {text}")
                         post_chat_message(chat_url, text)
+                    elif chat_url:
+                        post_chat_message(chat_url, "", cancel=True)
                     set_state("idle")
                     play_idle_beep()
                     print(f"\nState: {state} — listening for wake word\n")
@@ -741,6 +745,8 @@ def main():
                         text = " ".join(utterances)
                         print(f"  [sending] {text}")
                         post_chat_message(chat_url, text)
+                    elif chat_url:
+                        post_chat_message(chat_url, "", cancel=True)
                     set_state("idle")
                     play_idle_beep()
                     print(f"\nState: {state} — listening for wake word\n")
