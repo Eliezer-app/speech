@@ -93,10 +93,10 @@ def main():
         print("FAIL: context not fetched")
         ok = False
 
-    # 3. STT produced transcription
-    if ">> " in stdout:
-        lines = [l.strip() for l in stdout.splitlines() if l.strip().startswith(">> ")]
-        text = " ".join(l[3:] for l in lines)
+    # 3. STT produced transcription (incremental — last line is final text)
+    stt_lines = [l.strip()[3:] for l in stdout.splitlines() if l.strip().startswith(">> ")]
+    if stt_lines:
+        text = stt_lines[-1]  # last incremental line is the full transcription
         print(f"PASS: STT transcribed: \"{text}\"")
     else:
         print("FAIL: no STT transcription")

@@ -716,10 +716,9 @@ def main():
                     print(f"\nState: {state} — listening for wake word\n")
                 elif line:
                     print(f"  >> {line}")
-                    utterances.append(line)
+                    utterances = [line]  # hear: each line is full text so far
                     if chat_url:
-                        text = " ".join(utterances)
-                        post_chat_message(chat_url, text, partial=True)
+                        post_chat_message(chat_url, line, partial=True)
 
                 if not stt.is_alive():
                     print("ERROR: STT process died", file=sys.stderr, flush=True)
@@ -745,10 +744,9 @@ def main():
                     print(f"\nState: {state} — listening for wake word\n")
                 elif line:
                     print(f"  >> {line}")
-                    utterances.append(line)
+                    utterances = [line]  # hear: each line is full text so far
                     if chat_url:
-                        text = " ".join(utterances)
-                        post_chat_message(chat_url, text, partial=True)
+                        post_chat_message(chat_url, line, partial=True)
                 else:
                     time.sleep(CHUNK_MS / 1000)
             sd.wait()  # let beep finish before shutdown
