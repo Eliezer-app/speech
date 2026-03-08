@@ -394,6 +394,8 @@ def strip_markdown(text):
     text = re.sub(r'^[-*_]{3,}\s*$', '', text, flags=re.MULTILINE)
     # Remove blockquote markers
     text = re.sub(r'^>\s+', '', text, flags=re.MULTILINE)
+    # Remove HTML tags
+    text = re.sub(r'<[^>]+>', '', text)
     # Collapse newlines into spaces
     text = re.sub(r'\n+', ' ', text)
     text = re.sub(r'\s{2,}', ' ', text)
