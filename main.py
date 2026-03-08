@@ -51,10 +51,6 @@ def make_tone(freq, duration, volume=0.3):
     return tone
 
 
-def play_beep():
-    """Single rising beep — hotword detected."""
-    sd.play(make_tone(880, 0.15), samplerate=PLAYBACK_RATE)
-
 
 def play_idle_beep():
     """Two-tone tee-taa — back to idle."""
@@ -211,17 +207,17 @@ class STTProcess:
     Starts once at boot (model loads once). Controlled via stdin:
       send "START\\n" → STT begins listening and printing transcriptions
       STT prints "END\\n" on stdout → silence timeout, back to idle
+      STT prints "CANCEL\\n" on stdout → stop-word detected, discard
       send "STOP\\n"  → force stop current session
     """
 
-    def __init__(self, sock_path):
-        self.sock_path = sock_path
+    def __init__(self):
         self.proc = None
 
     def start(self):
         """Launch the STT process (loads models, then waits for START)."""
         self.proc = subprocess.Popen(
-            [str(_DIR / "stt" / "run"), "--audio-source", self.sock_path],
+            [str(_DIR / "stt" / "run")],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -600,7 +596,7 @@ def main():
         print(f"Agent chat: {chat_url}")
 
     # Start STT once (model loads in background)
-    stt = STTProcess(SOCKET_PATH)
+    stt = STTProcess()
     stt.start()
 
     # Start TTS
@@ -670,18 +666,19 @@ def main():
             except queue.Empty:
                 pass
 
-            # TTS finished speaking
+            # TTS finished speaking — always listen for response
             if state == "speaking" and tts.poll_done():
                 audio.muted = False
                 hotword.drain()
-                set_state(prev_state_before_speak)
-                if state == "conversing":
-                    # Resume STT
-                    agent_ctx = fetch_stt_context(ctx_url) if ctx_url else ""
-                    parts = [p for p in [stt_initial_prompt, agent_ctx] if p]
-                    context = "\n".join(parts)
-                    stt.activate(context)
-                print(f"  [speak] done, state: {state}")
+                set_state("conversing")
+                utterances = []
+                if chat_url:
+                    post_chat_message(chat_url, "listening...", partial=True)
+                agent_ctx = fetch_stt_context(ctx_url) if ctx_url else ""
+                parts = [p for p in [stt_initial_prompt, agent_ctx] if p]
+                context = "\n".join(parts)
+                stt.activate(context)
+                print(f"  [speak] done, listening for response")
 
             if state == "idle":
                 if not hotword.is_alive():
@@ -690,7 +687,6 @@ def main():
                     break
                 conf = hotword.poll_detection()
                 if conf is not None:
-                    play_beep()
                     print(f"\n*** Wake word detected (conf={conf:.3f}) ***")
                     agent_ctx = fetch_stt_context(ctx_url) if ctx_url else ""
                     parts = [p for p in [stt_initial_prompt, agent_ctx] if p]
@@ -706,7 +702,10 @@ def main():
 
             elif state == "conversing":
                 line = stt.poll_output()
-                if line == "END":
+                if line in ("END", "CANCEL"):
+                    if line == "CANCEL":
+                        utterances = []
+                        print("  [cancelled]")
                     if utterances and chat_url:
                         text = " ".join(utterances)
                         print(f"  [sending] {text}")
@@ -734,7 +733,10 @@ def main():
                 audio.broadcast(silence.tobytes())
                 stt.drain_stderr()
                 line = stt.poll_output()
-                if line == "END":
+                if line in ("END", "CANCEL"):
+                    if line == "CANCEL":
+                        utterances = []
+                        print("  [cancelled]")
                     if utterances and chat_url:
                         text = " ".join(utterances)
                         print(f"  [sending] {text}")
