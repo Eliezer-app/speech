@@ -394,7 +394,13 @@ def strip_markdown(text):
     text = re.sub(r'^[-*_]{3,}\s*$', '', text, flags=re.MULTILINE)
     # Remove blockquote markers
     text = re.sub(r'^>\s+', '', text, flags=re.MULTILINE)
-    # Remove HTML tags
+    # Replace widget iframes with spoken label (first path segment, clean)
+    def _widget_label(m):
+        name = m.group(1).split('/')[0].split('?')[0].split('#')[0]
+        name = name.replace('-', ' ').replace('_', ' ')
+        return f'Widget: {name}.'
+    text = re.sub(r'<iframe\s+src="/widget/([^"]+)"[^>]*>\s*</iframe>', _widget_label, text)
+    # Remove remaining HTML tags
     text = re.sub(r'<[^>]+>', '', text)
     # Collapse newlines into spaces
     text = re.sub(r'\n+', ' ', text)
