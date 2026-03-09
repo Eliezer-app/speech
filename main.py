@@ -262,12 +262,16 @@ class TTSProcess:
     Starts once at boot. Send text on stdin, it speaks and prints DONE.
     """
 
-    def __init__(self):
+    def __init__(self, voice=None):
         self.proc = None
+        self.voice = voice
 
     def start(self):
+        cmd = [str(_DIR / "stt" / "eli-tts")]
+        if self.voice:
+            cmd.extend(["-v", self.voice])
         self.proc = subprocess.Popen(
-            [str(_DIR / "stt" / "eli-tts"), "-v", "Serena"],
+            cmd,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -591,7 +595,10 @@ def main():
     stt.start()
 
     # Start TTS
-    tts = TTSProcess()
+    stt_cfg_path = _DIR / "stt" / "config.yaml"
+    stt_cfg = yaml.safe_load(open(stt_cfg_path)) if stt_cfg_path.exists() else {}
+    tts_voice = stt_cfg.get("tts", {}).get("voice")
+    tts = TTSProcess(voice=tts_voice)
     tts.start()
 
     # Start HTTP server for /speak
