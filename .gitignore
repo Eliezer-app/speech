@@ -6,3 +6,4 @@ venv/
 __pycache__/
 test_audio_pcm.wav
 config.yaml
+tmp/

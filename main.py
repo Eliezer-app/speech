@@ -108,6 +108,10 @@ class AudioServer:
 def stop_proc(proc, name="process"):
     """Terminate a subprocess, escalating to kill if needed."""
     if proc and proc.poll() is None:
+        try:
+            proc.stdin.close()
+        except Exception:
+            pass
         proc.terminate()
         try:
             proc.wait(timeout=2)
@@ -288,6 +292,12 @@ class TTSProcess:
             self.proc.stdin.write(f"{text}\n".encode())
             self.proc.stdin.flush()
 
+    def speak_stop(self):
+        """Send STOP to interrupt current utterance."""
+        if self.proc and self.proc.poll() is None:
+            self.proc.stdin.write(b"STOP\n")
+            self.proc.stdin.flush()
+
     def poll_done(self):
         """Non-blocking check if TTS finished speaking."""
         if self.proc is None or self.proc.poll() is not None:
@@ -313,6 +323,63 @@ class TTSProcess:
 
     def stop(self):
         stop_proc(self.proc, "tts")
+        self.proc = None
+
+
+class ListenStopProcess:
+    """Detects stop words during TTS playback using AEC.
+
+    Persistent process. Send START when TTS begins, STOP when TTS ends.
+    Outputs STOPPED when a stop word is detected.
+    """
+
+    def __init__(self, stop_words=None):
+        self.proc = None
+        self.stop_words = stop_words or ["stop"]
+
+    def start(self):
+        cmd = [str(_DIR / "stt" / "listen-stop"), "--stop-words", ",".join(self.stop_words)]
+        self.proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+    def activate(self):
+        if self.proc and self.proc.poll() is None:
+            self.proc.stdin.write(b"START\n")
+            self.proc.stdin.flush()
+
+    def deactivate(self):
+        if self.proc and self.proc.poll() is None:
+            self.proc.stdin.write(b"STOP\n")
+            self.proc.stdin.flush()
+
+    def poll_stopped(self):
+        if self.proc is None or self.proc.poll() is not None:
+            return False
+        ready, _, _ = select.select([self.proc.stdout], [], [], 0)
+        if ready:
+            line = self.proc.stdout.readline().decode().strip()
+            return line == "STOPPED"
+        return False
+
+    def drain_stderr(self):
+        if self.proc is None:
+            return
+        ready, _, _ = select.select([self.proc.stderr], [], [], 0)
+        while ready:
+            line = self.proc.stderr.readline().decode().rstrip()
+            if line:
+                print(f"  [listen-stop] {line}", file=sys.stderr, flush=True)
+            ready, _, _ = select.select([self.proc.stderr], [], [], 0)
+
+    def is_alive(self):
+        return self.proc is not None and self.proc.poll() is None
+
+    def stop(self):
+        stop_proc(self.proc, "listen-stop")
         self.proc = None
 
 
@@ -604,6 +671,12 @@ def main():
     tts = TTSProcess(engine=tts_cfg.get("engine", "apple"), voice=tts_cfg.get("voice"))
     tts.start()
 
+    # Start listen-stop (detects stop words during TTS playback)
+    tts_stop_words = tts_cfg.get("stop_words")
+    listen_stop = ListenStopProcess(stop_words=tts_stop_words) if tts_stop_words else None
+    if listen_stop:
+        listen_stop.start()
+
     # Start HTTP server for /speak
     http_server = start_http_server(listen_port)
     print(f"Listening on http://127.0.0.1:{listen_port}/speak")
@@ -617,6 +690,8 @@ def main():
         threading.Thread(target=http_server.shutdown, daemon=True).start()
         stt.stop()
         tts.stop()
+        if listen_stop:
+            listen_stop.stop()
         hotword.stop()
         audio.close()
 
@@ -651,6 +726,8 @@ def main():
 
             stt.drain_stderr()
             tts.drain_stderr()
+            if listen_stop:
+                listen_stop.drain_stderr()
 
             # Check speak queue — agent can interrupt at any time
             try:
@@ -663,6 +740,16 @@ def main():
                     set_state("speaking")
                     audio.muted = True
                     tts.speak(text)
+                    if listen_stop:
+                        listen_stop.activate()
+
+                # User said stop word during TTS
+                if state == "speaking" and listen_stop and listen_stop.poll_stopped():
+                    print("  [listen-stop] stop word detected, interrupting TTS")
+                    listen_stop.deactivate()
+                    tts.speak_stop()
+                    while not speak_queue.empty():
+                        speak_queue.get_nowait()
 
                 # TTS finished speaking — check queue before listening
                 if state == "speaking" and tts.poll_done():
@@ -671,6 +758,8 @@ def main():
                         print(f"  [speak] {text}")
                         tts.speak(text)
                     else:
+                        if listen_stop:
+                            listen_stop.deactivate()
                         audio.muted = False
                         hotword.drain()
                         set_state("conversing")
