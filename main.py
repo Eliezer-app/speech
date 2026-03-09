@@ -595,9 +595,7 @@ def main():
     stt.start()
 
     # Start TTS
-    stt_cfg_path = _DIR / "stt" / "config.yaml"
-    stt_cfg = yaml.safe_load(open(stt_cfg_path)) if stt_cfg_path.exists() else {}
-    tts_voice = stt_cfg.get("tts", {}).get("voice")
+    tts_voice = cfg.get("tts", {}).get("voice")
     tts = TTSProcess(voice=tts_voice)
     tts.start()
 
