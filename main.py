@@ -207,8 +207,7 @@ class STTProcess:
     def activate(self, context=""):
         """Send START to begin a listening session, with optional context."""
         if self.proc and self.proc.poll() is None:
-            msg = json.dumps({"cmd": "START", "context": context})
-            self.proc.stdin.write(f"{msg}\n".encode())
+            self.proc.stdin.write(b"START\n")
             self.proc.stdin.flush()
 
     def poll_output(self):
@@ -262,14 +261,20 @@ class TTSProcess:
     Starts once at boot. Send text on stdin, it speaks and prints DONE.
     """
 
-    def __init__(self, voice=None):
+    def __init__(self, engine="apple", voice=None):
         self.proc = None
+        self.engine = engine
         self.voice = voice
 
     def start(self):
-        cmd = [str(_DIR / "stt" / "eli-tts")]
-        if self.voice:
-            cmd.extend(["-v", self.voice])
+        if self.engine == "piper":
+            cmd = [str(_DIR / "tts" / "run")]
+            if self.voice:
+                cmd.extend(["--model", str(_DIR / "tts" / "models" / self.voice)])
+        else:
+            cmd = [str(_DIR / "stt" / "eli-tts")]
+            if self.voice:
+                cmd.extend(["-v", self.voice])
         self.proc = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
@@ -595,8 +600,8 @@ def main():
     stt.start()
 
     # Start TTS
-    tts_voice = cfg.get("tts", {}).get("voice")
-    tts = TTSProcess(voice=tts_voice)
+    tts_cfg = cfg.get("tts", {})
+    tts = TTSProcess(engine=tts_cfg.get("engine", "apple"), voice=tts_cfg.get("voice"))
     tts.start()
 
     # Start HTTP server for /speak
@@ -653,7 +658,7 @@ def main():
                     text = speak_queue.get_nowait()
                     print(f"  [speak] {text}")
                     if state == "conversing":
-                        stt.proc.stdin.write(b'{"cmd":"STOP"}\n')
+                        stt.proc.stdin.write(b"STOP\n")
                         stt.proc.stdin.flush()
                     set_state("speaking")
                     audio.muted = True
