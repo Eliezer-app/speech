@@ -286,7 +286,7 @@ class TTSProcess:
 
     def start(self):
         self.proc = subprocess.Popen(
-            [str(_DIR / "tts" / "run")],
+            [str(_DIR / "stt" / "eli-tts"), "-v", "Allison"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
