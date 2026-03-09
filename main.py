@@ -39,25 +39,6 @@ SOCKET_PATH = "/tmp/speech-audio.sock"
 SAMPLE_RATE = 16000
 CHUNK_MS = 80
 CHUNK_SAMPLES = int(SAMPLE_RATE * CHUNK_MS / 1000)
-PLAYBACK_RATE = 48000  # Mac speakers default
-
-
-def make_tone(freq, duration, volume=0.3):
-    t = np.linspace(0, duration, int(PLAYBACK_RATE * duration), dtype=np.float32)
-    fade = int(PLAYBACK_RATE * 0.01)
-    tone = np.sin(2 * np.pi * freq * t) * volume
-    tone[:fade] *= np.linspace(0, 1, fade)
-    tone[-fade:] *= np.linspace(1, 0, fade)
-    return tone
-
-
-
-def play_idle_beep():
-    """Two-tone tee-taa — back to idle."""
-    gap = np.zeros(int(PLAYBACK_RATE * 0.05), dtype=np.float32)
-    sound = np.concatenate([make_tone(660, 0.1), gap, make_tone(440, 0.12)])
-    sd.play(sound, samplerate=PLAYBACK_RATE)
-
 
 class AudioServer:
     """Captures mic audio and fans out to connected unix socket clients."""
@@ -286,7 +267,7 @@ class TTSProcess:
 
     def start(self):
         self.proc = subprocess.Popen(
-            [str(_DIR / "stt" / "eli-tts"), "-v", "Allison"],
+            [str(_DIR / "stt" / "eli-tts"), "-v", "Serena"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -737,7 +718,7 @@ def main():
                     elif chat_url:
                         post_chat_message(chat_url, "", cancel=True)
                     set_state("idle")
-                    play_idle_beep()
+
                     print(f"\nState: {state} — listening for wake word\n")
                 elif line:
                     print(f"  >> {line}")
@@ -770,7 +751,7 @@ def main():
                     elif chat_url:
                         post_chat_message(chat_url, "", cancel=True)
                     set_state("idle")
-                    play_idle_beep()
+
                     print(f"\nState: {state} — listening for wake word\n")
                 elif line:
                     print(f"  >> {line}")
@@ -779,7 +760,6 @@ def main():
                         post_chat_message(chat_url, line, partial=True)
                 else:
                     time.sleep(CHUNK_MS / 1000)
-            sd.wait()  # let beep finish before shutdown
 
     except KeyboardInterrupt:
         pass
