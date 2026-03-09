@@ -129,7 +129,7 @@ def stop_proc(proc, name="process"):
     if proc and proc.poll() is None:
         proc.terminate()
         try:
-            proc.wait(timeout=4)
+            proc.wait(timeout=2)
         except subprocess.TimeoutExpired:
             print(f"  {name} not responding, killing", file=sys.stderr, flush=True)
             proc.kill()
@@ -623,9 +623,9 @@ def main():
         print("\nShutting down...")
         if screen_timer:
             screen_timer.cancel()
-        http_server.shutdown()
-        tts.stop()
+        threading.Thread(target=http_server.shutdown, daemon=True).start()
         stt.stop()
+        tts.stop()
         hotword.stop()
         audio.close()
 
@@ -661,34 +661,48 @@ def main():
             stt.drain_stderr()
             tts.drain_stderr()
 
-            # Check speak queue — agent can push text at any time
+            # Check speak queue — agent can interrupt at any time
             try:
-                text = speak_queue.get_nowait()
-                print(f"  [speak] {text}")
-                if state == "conversing":
-                    # Interrupt STT session
-                    stt.proc.stdin.write(b'{"cmd":"STOP"}\n')
-                    stt.proc.stdin.flush()
-                prev_state_before_speak = state
-                set_state("speaking")
-                audio.muted = True
-                tts.speak(text)
-            except queue.Empty:
-                pass
+                if state != "speaking" and not speak_queue.empty():
+                    text = speak_queue.get_nowait()
+                    print(f"  [speak] {text}")
+                    if state == "conversing":
+                        stt.proc.stdin.write(b'{"cmd":"STOP"}\n')
+                        stt.proc.stdin.flush()
+                    set_state("speaking")
+                    audio.muted = True
+                    tts.speak(text)
 
-            # TTS finished speaking — always listen for response
-            if state == "speaking" and tts.poll_done():
+                # TTS finished speaking — check queue before listening
+                if state == "speaking" and tts.poll_done():
+                    if not speak_queue.empty():
+                        text = speak_queue.get_nowait()
+                        print(f"  [speak] {text}")
+                        tts.speak(text)
+                    else:
+                        audio.muted = False
+                        hotword.drain()
+                        set_state("conversing")
+                        utterances = []
+                        if chat_url:
+                            post_chat_message(chat_url, "listening...", partial=True)
+                        agent_ctx = fetch_stt_context(ctx_url) if ctx_url else ""
+                        parts = [p for p in [stt_initial_prompt, agent_ctx] if p]
+                        context = "\n".join(parts)
+                        stt.activate(context)
+                        print(f"  [speak] done, listening for response")
+            except Exception as e:
+                import traceback
+                print(f"ERROR in speak/TTS handling: {e}", file=sys.stderr, flush=True)
+                traceback.print_exc(file=sys.stderr)
+                print(f"  state={state} audio.muted={audio.muted} "
+                      f"tts.alive={tts.is_alive()} stt.alive={stt.is_alive()} "
+                      f"queue_size={speak_queue.qsize()}",
+                      file=sys.stderr, flush=True)
+                # Try to recover to a sane state
                 audio.muted = False
-                hotword.drain()
-                set_state("conversing")
-                utterances = []
-                if chat_url:
-                    post_chat_message(chat_url, "listening...", partial=True)
-                agent_ctx = fetch_stt_context(ctx_url) if ctx_url else ""
-                parts = [p for p in [stt_initial_prompt, agent_ctx] if p]
-                context = "\n".join(parts)
-                stt.activate(context)
-                print(f"  [speak] done, listening for response")
+                if state == "speaking":
+                    set_state("idle")
 
             if state == "idle":
                 if not hotword.is_alive():
